@@ -1,0 +1,291 @@
+
+import os
+import re
+import pandas as pd
+import numpy as np
+import streamlit as st
+import pydeck as pdk
+import plotly.express as px
+import plotly.graph_objects as go
+
+DATA_PATH = os.path.join("jobs_dashboard", "jobs_enriched.parquet")
+
+st.set_page_config(
+    page_title="Asst. Prof Health/Policy Jobs — US",
+    page_icon="🎓",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── custom CSS ──────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+  .metric-card {background:#f0f4ff;border-radius:10px;padding:14px 18px;text-align:center;}
+  .metric-num  {font-size:2rem;font-weight:700;color:#1a3c8f;}
+  .metric-lbl  {font-size:.8rem;color:#555;margin-top:2px;}
+  .section-hdr {font-size:1.15rem;font-weight:600;margin-top:1.2rem;margin-bottom:.4rem;color:#1a3c8f;}
+</style>
+""", unsafe_allow_html=True)
+
+# ── R-tier colour map ────────────────────────────────────────────────────────
+RTIER_COLOR = {
+    "R1": [220,  38,  38],   # red
+    "R2": [ 37, 99, 235],   # blue
+    "R3": [ 22, 163,  74],  # green
+    "(unknown)": [156,163,175], # grey
+}
+
+@st.cache_data
+def load_data():
+    if not os.path.exists(DATA_PATH):
+        st.error(f"Missing data file: {DATA_PATH}. Run the notebook first.")
+        st.stop()
+    df = pd.read_parquet(DATA_PATH)
+    df["r_tier_f"] = df["r_tier"].fillna("(unknown)")
+    df["salary_mid"] = df[["salary_min","salary_max"]].mean(axis=1)
+    df["lat"] = pd.to_numeric(df.get("lat"), errors="coerce")
+    df["lon"] = pd.to_numeric(df.get("lon"), errors="coerce")
+    # clamp to US bounds
+    mask = df["lat"].between(18, 72) & df["lon"].between(-180, -60)
+    df.loc[~mask, ["lat","lon"]] = np.nan
+    return df
+
+df = load_data()
+
+# ── Sidebar filters ──────────────────────────────────────────────────────────
+with st.sidebar:
+    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Graduation_hat.svg/240px-Graduation_hat.svg.png", width=60)
+    st.title("Filters")
+
+    sources = sorted(df["source"].dropna().unique().tolist())
+    source_sel = st.multiselect("Source", sources, default=sources)
+
+    rtier_opts = ["R1","R2","R3","(unknown)"]
+    rtier_sel  = st.multiselect("Research Tier (Carnegie)", rtier_opts, default=rtier_opts)
+
+    states = sorted(df["state"].dropna().unique().tolist())
+    state_sel = st.multiselect("State", states, default=states)
+
+    salary_on = st.checkbox("Only jobs with salary info", value=False)
+
+    kw = st.text_input("Keyword search (title / institution)", value="")
+
+    st.markdown("---")
+    st.caption(f"Data pulled: {df['pulled_at_utc'].iloc[0][:10] if 'pulled_at_utc' in df.columns else 'unknown'}")
+
+# ── Apply filters ────────────────────────────────────────────────────────────
+f = df.copy()
+if source_sel:
+    f = f[f["source"].isin(source_sel)]
+f = f[f["r_tier_f"].isin(rtier_sel)]
+if state_sel:
+    f = f[(f["state"].isin(state_sel)) | (f["state"].isna())]
+if salary_on:
+    f = f[f["salary_min"].notna() | f["salary_max"].notna()]
+if kw.strip():
+    needle = kw.strip().lower()
+    blob = (f["title"].fillna("") + " " + f.get("summary", pd.Series("", index=f.index)).fillna("") + " " + f["institution"].fillna("")).str.lower()
+    f = f[blob.str.contains(re.escape(needle), na=False)]
+
+# ── KPI row ──────────────────────────────────────────────────────────────────
+st.markdown("## 🎓 Assistant Professor Jobs — Health / Public Health / Policy / Medicine (US)")
+
+k1, k2, k3, k4, k5 = st.columns(5)
+with k1:
+    st.markdown(f'<div class="metric-card"><div class="metric-num">{len(f)}</div><div class="metric-lbl">Total Openings</div></div>', unsafe_allow_html=True)
+with k2:
+    r1_n = (f["r_tier_f"] == "R1").sum()
+    st.markdown(f'<div class="metric-card"><div class="metric-num">{r1_n}</div><div class="metric-lbl">R1 Schools</div></div>', unsafe_allow_html=True)
+with k3:
+    sal_known = f["salary_mid"].dropna()
+    sal_str = f"${sal_known.median()/1000:.0f}K" if len(sal_known) > 0 else "N/A"
+    st.markdown(f'<div class="metric-card"><div class="metric-num">{sal_str}</div><div class="metric-lbl">Median Salary</div></div>', unsafe_allow_html=True)
+with k4:
+    n_states = f["state"].dropna().nunique()
+    st.markdown(f'<div class="metric-card"><div class="metric-num">{n_states}</div><div class="metric-lbl">States</div></div>', unsafe_allow_html=True)
+with k5:
+    mappable = f.dropna(subset=["lat","lon"]).shape[0]
+    st.markdown(f'<div class="metric-card"><div class="metric-num">{mappable}</div><div class="metric-lbl">Mapped Locations</div></div>', unsafe_allow_html=True)
+
+st.markdown("---")
+
+# ── Tab layout ───────────────────────────────────────────────────────────────
+tab_map, tab_jobs, tab_analytics = st.tabs(["🗺️  Map", "📋  Job Listings", "📊  Market Analytics"])
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 1 — MAP
+# ════════════════════════════════════════════════════════════════════════════
+with tab_map:
+    m = f.dropna(subset=["lat","lon"]).copy()
+
+    if len(m) == 0:
+        st.info("No mappable locations in current filter. Try broadening the filters.")
+    else:
+        # Assign colour per R-tier
+        m["color"] = m["r_tier_f"].map(RTIER_COLOR).apply(lambda c: c if isinstance(c, list) else [156,163,175])
+
+        # Build rich tooltip text
+        def make_tooltip(r):
+            sal = ""
+            if pd.notna(r.get("salary_min")) and r["salary_min"] > 0:
+                lo = f"${r['salary_min']:,.0f}"
+                hi = f"${r['salary_max']:,.0f}" if pd.notna(r.get("salary_max")) and r["salary_max"] != r["salary_min"] else ""
+                sal = f"<br>💰 {lo}" + (f" – {hi}" if hi else "")
+            inst = r.get("institution") or ""
+            loc  = r.get("location_raw") or ""
+            tier = r.get("r_tier_f") or ""
+            title = r.get("title") or ""
+            return f"<b>{title[:80]}</b><br>{inst}<br>📍 {loc}<br>🏫 {tier}{sal}"
+
+        m["tooltip_html"] = m.apply(make_tooltip, axis=1)
+
+        layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=m[["lat","lon","color","tooltip_html","title","institution","location_raw","r_tier_f"]],
+            get_position=["lon", "lat"],
+            get_fill_color="color",
+            get_radius=40000,
+            radius_min_pixels=6,
+            radius_max_pixels=22,
+            pickable=True,
+            auto_highlight=True,
+            opacity=0.85,
+        )
+
+        view = pdk.ViewState(
+            latitude=38.5,
+            longitude=-96.0,
+            zoom=3.4,
+            pitch=0,
+        )
+
+        deck = pdk.Deck(
+            layers=[layer],
+            initial_view_state=view,
+            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+            tooltip={"html": "{tooltip_html}", "style": {"background":"white","color":"#222","padding":"8px","border-radius":"6px","font-size":"13px","max-width":"320px"}},
+        )
+        st.pydeck_chart(deck, use_container_width=True, height=520)
+
+        # Legend
+        leg_cols = st.columns(len(RTIER_COLOR))
+        for col, (tier, rgb) in zip(leg_cols, RTIER_COLOR.items()):
+            hex_c = "#{:02x}{:02x}{:02x}".format(*rgb)
+            col.markdown(f'<span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:{hex_c};margin-right:5px;vertical-align:middle;"></span>{tier}', unsafe_allow_html=True)
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 2 — JOB LISTINGS
+# ════════════════════════════════════════════════════════════════════════════
+with tab_jobs:
+    show_cols = ["title","institution","location_raw","state","r_tier_f","salary_min","salary_max","salary_text","source"]
+    show_cols = [c for c in show_cols if c in f.columns]
+
+    f2 = f.copy()
+    if "link" in f2.columns:
+        f2["Apply"] = f2["link"].apply(lambda u: f"[🔗 Apply]({u})" if isinstance(u, str) and u.startswith("http") else "")
+        show_cols = show_cols + ["Apply"]
+
+    rename_map = {
+        "title": "Job Title", "institution": "Institution",
+        "location_raw": "Location", "state": "State",
+        "r_tier_f": "R-Tier", "salary_min": "Salary Min",
+        "salary_max": "Salary Max", "salary_text": "Salary (raw)",
+        "source": "Source",
+    }
+    display_df = f2[show_cols].rename(columns=rename_map)
+    display_df = display_df.sort_values(by=["R-Tier","State"], ascending=[True,True])
+
+    st.markdown(f'<div class="section-hdr">Showing {len(display_df)} positions</div>', unsafe_allow_html=True)
+    st.dataframe(display_df, use_container_width=True, hide_index=True, height=520)
+
+    csv = display_df.drop(columns=["Apply"], errors="ignore").to_csv(index=False).encode("utf-8")
+    st.download_button("⬇️ Download CSV", csv, "health_jobs.csv", "text/csv")
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 3 — ANALYTICS
+# ════════════════════════════════════════════════════════════════════════════
+with tab_analytics:
+    c1, c2 = st.columns(2)
+
+    # ── Jobs by R-Tier ───────────────────────────────────────────────────────
+    with c1:
+        st.markdown('<div class="section-hdr">Jobs by Research Tier</div>', unsafe_allow_html=True)
+        tier_counts = f["r_tier_f"].value_counts().reset_index()
+        tier_counts.columns = ["R-Tier","Count"]
+        color_map = {k: "#{:02x}{:02x}{:02x}".format(*v) for k,v in RTIER_COLOR.items()}
+        fig_tier = px.bar(
+            tier_counts, x="R-Tier", y="Count",
+            color="R-Tier", color_discrete_map=color_map,
+            text="Count", template="plotly_white",
+        )
+        fig_tier.update_traces(textposition="outside")
+        fig_tier.update_layout(showlegend=False, margin=dict(t=20,b=20))
+        st.plotly_chart(fig_tier, use_container_width=True)
+
+    # ── Jobs by State ────────────────────────────────────────────────────────
+    with c2:
+        st.markdown('<div class="section-hdr">Jobs by State (top 15)</div>', unsafe_allow_html=True)
+        state_counts = f["state"].dropna().value_counts().head(15).reset_index()
+        state_counts.columns = ["State","Count"]
+        fig_state = px.bar(
+            state_counts, x="Count", y="State", orientation="h",
+            color="Count", color_continuous_scale="Blues",
+            template="plotly_white", text="Count",
+        )
+        fig_state.update_traces(textposition="outside")
+        fig_state.update_layout(yaxis=dict(autorange="reversed"), coloraxis_showscale=False, margin=dict(t=20,b=20))
+        st.plotly_chart(fig_state, use_container_width=True)
+
+    # ── Salary distribution ──────────────────────────────────────────────────
+    st.markdown('<div class="section-hdr">Salary Distribution (postings that disclosed salary)</div>', unsafe_allow_html=True)
+    sal_df = f[f["salary_mid"].notna() & (f["salary_mid"] > 10000)].copy()
+
+    if len(sal_df) < 2:
+        st.info("Not enough salary data in current filter to plot a distribution. Most postings do not disclose salary.")
+    else:
+        fig_sal = px.histogram(
+            sal_df, x="salary_mid", nbins=20,
+            color="r_tier_f", color_discrete_map=color_map,
+            barmode="overlay", opacity=0.75,
+            labels={"salary_mid":"Midpoint Salary ($)","r_tier_f":"R-Tier"},
+            template="plotly_white",
+        )
+        fig_sal.update_layout(margin=dict(t=20,b=20), legend_title="R-Tier")
+        fig_sal.update_xaxes(tickformat="$,.0f")
+        st.plotly_chart(fig_sal, use_container_width=True)
+
+        sal_stats = sal_df.groupby("r_tier_f")["salary_mid"].agg(["count","median","min","max"]).reset_index()
+        sal_stats.columns = ["R-Tier","# with salary","Median","Min","Max"]
+        for col in ["Median","Min","Max"]:
+            sal_stats[col] = sal_stats[col].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "—")
+        st.dataframe(sal_stats, use_container_width=True, hide_index=True)
+
+    # ── US Choropleth — jobs per state ───────────────────────────────────────
+    st.markdown('<div class="section-hdr">Geographic Concentration (jobs per state)</div>', unsafe_allow_html=True)
+    state_all = f["state"].dropna().value_counts().reset_index()
+    state_all.columns = ["State","Count"]
+    fig_choro = px.choropleth(
+        state_all, locations="State", locationmode="USA-states",
+        color="Count", scope="usa",
+        color_continuous_scale="YlOrRd",
+        labels={"Count":"# Openings"},
+        template="plotly_white",
+    )
+    fig_choro.update_layout(margin=dict(t=10,b=10), geo=dict(bgcolor="rgba(0,0,0,0)"))
+    st.plotly_chart(fig_choro, use_container_width=True)
+
+    # ── Top institutions ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-hdr">Top Hiring Institutions</div>', unsafe_allow_html=True)
+    inst_counts = f["institution"].dropna().value_counts().head(12).reset_index()
+    inst_counts.columns = ["Institution","Openings"]
+    fig_inst = px.bar(
+        inst_counts, x="Openings", y="Institution", orientation="h",
+        color="Openings", color_continuous_scale="Teal",
+        template="plotly_white", text="Openings",
+    )
+    fig_inst.update_traces(textposition="outside")
+    fig_inst.update_layout(yaxis=dict(autorange="reversed"), coloraxis_showscale=False, margin=dict(t=20,b=20))
+    st.plotly_chart(fig_inst, use_container_width=True)
+
+st.markdown("---")
+st.caption("Sources: HigherEdJobs RSS feeds · Carnegie Classification public data (2021) · Geocoding via OpenStreetMap Nominatim · Salary data best-effort from posting text.")
