@@ -35,6 +35,15 @@ RTIER_COLOR = {
     "(unknown)": [156,163,175], # grey
 }
 
+CITY_SIZE_ORDER = [
+    "Major metro (1M+)",
+    "Large city (500K-1M)",
+    "Mid-size city (100K-500K)",
+    "Small city (50K-100K)",
+    "Town (< 50K)",
+    "Unknown",
+]
+
 @st.cache_data
 def load_data():
     if not os.path.exists(DATA_PATH):
@@ -45,13 +54,18 @@ def load_data():
     df["salary_mid"] = df[["salary_min","salary_max"]].mean(axis=1)
     df["lat"] = pd.to_numeric(df.get("lat"), errors="coerce")
     df["lon"] = pd.to_numeric(df.get("lon"), errors="coerce")
-    # clamp to US bounds
     mask = df["lat"].between(18, 72) & df["lon"].between(-180, -60)
     df.loc[~mask, ["lat","lon"]] = np.nan
     if "posted_ago" not in df.columns:
         df["posted_ago"] = None
     if "published_date" not in df.columns:
         df["published_date"] = None
+    if "city_pop" not in df.columns:
+        df["city_pop"] = np.nan
+    if "city_size" not in df.columns:
+        df["city_size"] = "Unknown"
+    else:
+        df["city_size"] = df["city_size"].fillna("Unknown")
     return df
 
 df = load_data()
@@ -73,6 +87,15 @@ with st.sidebar:
     salary_on = st.checkbox("Only jobs with salary info", value=False)
 
     st.markdown("---")
+    st.markdown("**🏙️ City Size**")
+    city_size_sel = st.multiselect(
+        "City size",
+        options=CITY_SIZE_ORDER,
+        default=CITY_SIZE_ORDER,
+        label_visibility="collapsed",
+    )
+
+    st.markdown("---")
     st.info("💡 Use the **Search job titles** bar in the Job Listings tab to filter by keyword.")
     pulled = df["pulled_at_utc"].iloc[0][:10] if "pulled_at_utc" in df.columns else "unknown"
     st.caption(f"Data pulled: {pulled} · {len(df)} total listings")
@@ -86,6 +109,8 @@ if state_sel:
     f = f[(f["state"].isin(state_sel)) | (f["state"].isna())]
 if salary_on:
     f = f[f["salary_min"].notna() | f["salary_max"].notna()]
+if city_size_sel and len(city_size_sel) < len(CITY_SIZE_ORDER):
+    f = f[f["city_size"].isin(city_size_sel)]
 
 # ── KPI row ──────────────────────────────────────────────────────────────────
 st.markdown("## 🎓 Assistant Professor Jobs — Health / Public Health / Policy / Medicine (US)")
@@ -144,7 +169,12 @@ with tab_map:
             title = r.get("title") or ""
             ago   = r.get("posted_ago") or ""
             ago_str = f"<br>🕐 {ago}" if ago else ""
-            return f"<b>{title[:80]}</b><br>{inst}<br>📍 {loc}<br>🏫 {tier}{sal}{ago_str}"
+            pop   = r.get("city_pop")
+            try:
+                pop_str = f"<br>🏙️ Pop. {int(pop):,}" if pd.notna(pop) and pop > 0 else ""
+            except Exception:
+                pop_str = ""
+            return f"<b>{title[:80]}</b><br>{inst}<br>📍 {loc}{pop_str}<br>🏫 {tier}{sal}{ago_str}"
 
         m["tooltip_html"] = m.apply(make_tooltip, axis=1)
 
@@ -216,8 +246,21 @@ with tab_jobs:
 
     f2["Salary"] = f2.apply(fmt_salary, axis=1)
 
+    # Format population for display
+    def fmt_pop(row):
+        pop  = row.get("city_pop")
+        size = row.get("city_size") or "Unknown"
+        try:
+            if pd.notna(pop) and pop > 0:
+                return f"{int(pop):,}  ({size})"
+        except Exception:
+            pass
+        return size if size != "Unknown" else ""
+
+    f2["City Population"] = f2.apply(fmt_pop, axis=1)
+
     show_cols = ["title", "institution", "location_raw", "state", "r_tier_f",
-                 "Salary", "posted_ago", "published_date", "source", "link"]
+                 "City Population", "Salary", "posted_ago", "published_date", "source", "link"]
     show_cols = [c for c in show_cols if c in f2.columns]
 
     rename_map = {
@@ -238,6 +281,7 @@ with tab_jobs:
         height=540,
         column_config={
             "Apply": st.column_config.LinkColumn("Apply", display_text="🔗 Apply"),
+            "City Population": st.column_config.TextColumn("City Population", width="large"),
             "Salary": st.column_config.TextColumn("Salary", width="medium"),
             "Posted": st.column_config.TextColumn("Posted", width="small"),
             "R-Tier": st.column_config.TextColumn("R-Tier", width="small"),
