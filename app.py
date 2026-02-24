@@ -29,9 +29,9 @@ st.markdown("""
 
 # ── R-tier colour map ────────────────────────────────────────────────────────
 RTIER_COLOR = {
-    "R1": [220,  38,  38],   # red
-    "R2": [ 37, 99, 235],   # blue
-    "R3": [ 22, 163,  74],  # green
+    "R1": [220,  38,  38],      # red
+    "R2": [ 37,  99, 235],      # blue
+    "R3": [ 22, 163,  74],      # green
     "(unknown)": [156,163,175], # grey
 }
 
@@ -48,6 +48,10 @@ def load_data():
     # clamp to US bounds
     mask = df["lat"].between(18, 72) & df["lon"].between(-180, -60)
     df.loc[~mask, ["lat","lon"]] = np.nan
+    if "posted_ago" not in df.columns:
+        df["posted_ago"] = None
+    if "published_date" not in df.columns:
+        df["published_date"] = None
     return df
 
 df = load_data()
@@ -71,7 +75,8 @@ with st.sidebar:
     kw = st.text_input("Keyword search (title / institution)", value="")
 
     st.markdown("---")
-    st.caption(f"Data pulled: {df['pulled_at_utc'].iloc[0][:10] if 'pulled_at_utc' in df.columns else 'unknown'}")
+    pulled = df["pulled_at_utc"].iloc[0][:10] if "pulled_at_utc" in df.columns else "unknown"
+    st.caption(f"Data pulled: {pulled} · {len(df)} total listings")
 
 # ── Apply filters ────────────────────────────────────────────────────────────
 f = df.copy()
@@ -121,21 +126,24 @@ with tab_map:
     if len(m) == 0:
         st.info("No mappable locations in current filter. Try broadening the filters.")
     else:
-        # Assign colour per R-tier
         m["color"] = m["r_tier_f"].map(RTIER_COLOR).apply(lambda c: c if isinstance(c, list) else [156,163,175])
 
-        # Build rich tooltip text
         def make_tooltip(r):
             sal = ""
-            if pd.notna(r.get("salary_min")) and r["salary_min"] > 0:
-                lo = f"${r['salary_min']:,.0f}"
-                hi = f"${r['salary_max']:,.0f}" if pd.notna(r.get("salary_max")) and r["salary_max"] != r["salary_min"] else ""
-                sal = f"<br>💰 {lo}" + (f" – {hi}" if hi else "")
-            inst = r.get("institution") or ""
-            loc  = r.get("location_raw") or ""
-            tier = r.get("r_tier_f") or ""
+            try:
+                if pd.notna(r.get("salary_min")) and r["salary_min"] > 0:
+                    lo = f"${r['salary_min']:,.0f}"
+                    hi = f"${r['salary_max']:,.0f}" if pd.notna(r.get("salary_max")) and r["salary_max"] != r["salary_min"] else ""
+                    sal = f"<br>💰 {lo}" + (f" – {hi}" if hi else "")
+            except Exception:
+                pass
+            inst  = r.get("institution") or ""
+            loc   = r.get("location_raw") or ""
+            tier  = r.get("r_tier_f") or ""
             title = r.get("title") or ""
-            return f"<b>{title[:80]}</b><br>{inst}<br>📍 {loc}<br>🏫 {tier}{sal}"
+            ago   = r.get("posted_ago") or ""
+            ago_str = f"<br>🕐 {ago}" if ago else ""
+            return f"<b>{title[:80]}</b><br>{inst}<br>📍 {loc}<br>🏫 {tier}{sal}{ago_str}"
 
         m["tooltip_html"] = m.apply(make_tooltip, axis=1)
 
@@ -152,12 +160,7 @@ with tab_map:
             opacity=0.85,
         )
 
-        view = pdk.ViewState(
-            latitude=38.5,
-            longitude=-96.0,
-            zoom=3.4,
-            pitch=0,
-        )
+        view = pdk.ViewState(latitude=38.5, longitude=-96.0, zoom=3.4, pitch=0)
 
         deck = pdk.Deck(
             layers=[layer],
@@ -167,7 +170,6 @@ with tab_map:
         )
         st.pydeck_chart(deck, use_container_width=True, height=520)
 
-        # Legend
         leg_cols = st.columns(len(RTIER_COLOR))
         for col, (tier, rgb) in zip(leg_cols, RTIER_COLOR.items()):
             hex_c = "#{:02x}{:02x}{:02x}".format(*rgb)
@@ -177,26 +179,50 @@ with tab_map:
 # TAB 2 — JOB LISTINGS
 # ════════════════════════════════════════════════════════════════════════════
 with tab_jobs:
-    show_cols = ["title","institution","location_raw","state","r_tier_f","salary_min","salary_max","salary_text","source"]
-    show_cols = [c for c in show_cols if c in f.columns]
-
     f2 = f.copy()
-    if "link" in f2.columns:
-        f2["Apply"] = f2["link"].apply(lambda u: f"[🔗 Apply]({u})" if isinstance(u, str) and u.startswith("http") else "")
-        show_cols = show_cols + ["Apply"]
+
+    def fmt_salary(row):
+        lo = row.get("salary_min")
+        hi = row.get("salary_max")
+        txt = row.get("salary_text")
+        try:
+            if pd.notna(lo) and lo > 0:
+                if pd.notna(hi) and hi > lo:
+                    return f"${lo:,.0f} – ${hi:,.0f}"
+                return f"${lo:,.0f}"
+        except Exception:
+            pass
+        return txt if isinstance(txt, str) else ""
+
+    f2["Salary"] = f2.apply(fmt_salary, axis=1)
+
+    show_cols = ["title", "institution", "location_raw", "state", "r_tier_f",
+                 "Salary", "posted_ago", "published_date", "source", "link"]
+    show_cols = [c for c in show_cols if c in f2.columns]
 
     rename_map = {
         "title": "Job Title", "institution": "Institution",
         "location_raw": "Location", "state": "State",
-        "r_tier_f": "R-Tier", "salary_min": "Salary Min",
-        "salary_max": "Salary Max", "salary_text": "Salary (raw)",
-        "source": "Source",
+        "r_tier_f": "R-Tier", "posted_ago": "Posted",
+        "published_date": "Date Posted", "source": "Source",
+        "link": "Apply",
     }
     display_df = f2[show_cols].rename(columns=rename_map)
-    display_df = display_df.sort_values(by=["R-Tier","State"], ascending=[True,True])
+    display_df = display_df.sort_values(by=["Date Posted"], ascending=False, na_position="last")
 
     st.markdown(f'<div class="section-hdr">Showing {len(display_df)} positions</div>', unsafe_allow_html=True)
-    st.dataframe(display_df, use_container_width=True, hide_index=True, height=520)
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        height=540,
+        column_config={
+            "Apply": st.column_config.LinkColumn("Apply", display_text="🔗 Apply"),
+            "Salary": st.column_config.TextColumn("Salary", width="medium"),
+            "Posted": st.column_config.TextColumn("Posted", width="small"),
+            "R-Tier": st.column_config.TextColumn("R-Tier", width="small"),
+        },
+    )
 
     csv = display_df.drop(columns=["Apply"], errors="ignore").to_csv(index=False).encode("utf-8")
     st.download_button("⬇️ Download CSV", csv, "health_jobs.csv", "text/csv")
@@ -205,14 +231,13 @@ with tab_jobs:
 # TAB 3 — ANALYTICS
 # ════════════════════════════════════════════════════════════════════════════
 with tab_analytics:
+    color_map = {k: "#{:02x}{:02x}{:02x}".format(*v) for k,v in RTIER_COLOR.items()}
     c1, c2 = st.columns(2)
 
-    # ── Jobs by R-Tier ───────────────────────────────────────────────────────
     with c1:
         st.markdown('<div class="section-hdr">Jobs by Research Tier</div>', unsafe_allow_html=True)
         tier_counts = f["r_tier_f"].value_counts().reset_index()
         tier_counts.columns = ["R-Tier","Count"]
-        color_map = {k: "#{:02x}{:02x}{:02x}".format(*v) for k,v in RTIER_COLOR.items()}
         fig_tier = px.bar(
             tier_counts, x="R-Tier", y="Count",
             color="R-Tier", color_discrete_map=color_map,
@@ -222,7 +247,6 @@ with tab_analytics:
         fig_tier.update_layout(showlegend=False, margin=dict(t=20,b=20))
         st.plotly_chart(fig_tier, use_container_width=True)
 
-    # ── Jobs by State ────────────────────────────────────────────────────────
     with c2:
         st.markdown('<div class="section-hdr">Jobs by State (top 15)</div>', unsafe_allow_html=True)
         state_counts = f["state"].dropna().value_counts().head(15).reset_index()
@@ -241,7 +265,7 @@ with tab_analytics:
     sal_df = f[f["salary_mid"].notna() & (f["salary_mid"] > 10000)].copy()
 
     if len(sal_df) < 2:
-        st.info("Not enough salary data in current filter to plot a distribution. Most postings do not disclose salary.")
+        st.info("Not enough salary data in current filter to plot. Most postings do not disclose salary.")
     else:
         fig_sal = px.histogram(
             sal_df, x="salary_mid", nbins=20,
@@ -260,7 +284,7 @@ with tab_analytics:
             sal_stats[col] = sal_stats[col].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "—")
         st.dataframe(sal_stats, use_container_width=True, hide_index=True)
 
-    # ── US Choropleth — jobs per state ───────────────────────────────────────
+    # ── US Choropleth ────────────────────────────────────────────────────────
     st.markdown('<div class="section-hdr">Geographic Concentration (jobs per state)</div>', unsafe_allow_html=True)
     state_all = f["state"].dropna().value_counts().reset_index()
     state_all.columns = ["State","Count"]
@@ -288,4 +312,4 @@ with tab_analytics:
     st.plotly_chart(fig_inst, use_container_width=True)
 
 st.markdown("---")
-st.caption("Sources: HigherEdJobs RSS feeds · Carnegie Classification public data (2021) · Geocoding via OpenStreetMap Nominatim · Salary data best-effort from posting text.")
+st.caption("Sources: HigherEdJobs RSS · Academic Jobs Online RSS · Carnegie Classification (2021 basic codes) · Geocoding via OpenStreetMap Nominatim · Salary best-effort from posting text.")
