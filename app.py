@@ -72,9 +72,8 @@ with st.sidebar:
 
     salary_on = st.checkbox("Only jobs with salary info", value=False)
 
-    kw = st.text_input("Keyword search (title / institution)", value="")
-
     st.markdown("---")
+    st.info("💡 Use the **Search job titles** bar in the Job Listings tab to filter by keyword.")
     pulled = df["pulled_at_utc"].iloc[0][:10] if "pulled_at_utc" in df.columns else "unknown"
     st.caption(f"Data pulled: {pulled} · {len(df)} total listings")
 
@@ -87,10 +86,6 @@ if state_sel:
     f = f[(f["state"].isin(state_sel)) | (f["state"].isna())]
 if salary_on:
     f = f[f["salary_min"].notna() | f["salary_max"].notna()]
-if kw.strip():
-    needle = kw.strip().lower()
-    blob = (f["title"].fillna("") + " " + f.get("summary", pd.Series("", index=f.index)).fillna("") + " " + f["institution"].fillna("")).str.lower()
-    f = f[blob.str.contains(re.escape(needle), na=False)]
 
 # ── KPI row ──────────────────────────────────────────────────────────────────
 st.markdown("## 🎓 Assistant Professor Jobs — Health / Public Health / Policy / Medicine (US)")
@@ -185,7 +180,23 @@ with tab_map:
 # TAB 2 — JOB LISTINGS
 # ════════════════════════════════════════════════════════════════════════════
 with tab_jobs:
+    # ── Inline title search bar ──────────────────────────────────────────────
+    col_search, col_clear = st.columns([5, 1])
+    with col_search:
+        title_search = st.text_input(
+            "🔍 Search job titles",
+            placeholder='e.g. "policy", "epidemiology", "tenure-track"...',
+            label_visibility="collapsed",
+        )
+    with col_clear:
+        if st.button("Clear", use_container_width=True):
+            title_search = ""
+
     f2 = f.copy()
+    if title_search.strip():
+        needle = title_search.strip().lower()
+        f2 = f2[f2["title"].fillna("").str.lower().str.contains(re.escape(needle), na=False)]
+        st.caption(f"**{len(f2)}** results matching **\"{title_search}\"** — clear search to see all")
 
     def fmt_salary(row):
         lo   = row.get("salary_min")
