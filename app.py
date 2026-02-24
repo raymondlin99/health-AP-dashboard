@@ -131,10 +131,16 @@ with tab_map:
         def make_tooltip(r):
             sal = ""
             try:
-                if pd.notna(r.get("salary_min")) and r["salary_min"] > 0:
-                    lo = f"${r['salary_min']:,.0f}"
-                    hi = f"${r['salary_max']:,.0f}" if pd.notna(r.get("salary_max")) and r["salary_max"] != r["salary_min"] else ""
-                    sal = f"<br>💰 {lo}" + (f" – {hi}" if hi else "")
+                lo_v = r.get("salary_min")
+                hi_v = r.get("salary_max")
+                stype = r.get("salary_type")
+                if pd.notna(lo_v) and lo_v > 0:
+                    if stype == "hourly":
+                        hi_s = f" – ${hi_v:,.2f}" if pd.notna(hi_v) and hi_v > lo_v else ""
+                        sal = f"<br>⚠️ ${lo_v:,.2f}{hi_s}/hr (hourly rate)"
+                    else:
+                        hi_s = f" – ${hi_v:,.0f}" if pd.notna(hi_v) and hi_v != lo_v else ""
+                        sal = f"<br>💰 ${lo_v:,.0f}{hi_s}"
             except Exception:
                 pass
             inst  = r.get("institution") or ""
@@ -182,17 +188,20 @@ with tab_jobs:
     f2 = f.copy()
 
     def fmt_salary(row):
-        lo = row.get("salary_min")
-        hi = row.get("salary_max")
-        txt = row.get("salary_text")
+        lo   = row.get("salary_min")
+        hi   = row.get("salary_max")
+        stype = row.get("salary_type")
         try:
             if pd.notna(lo) and lo > 0:
+                if stype == "hourly":
+                    hi_str = f" – ${hi:,.2f}" if pd.notna(hi) and hi > lo else ""
+                    return f"⚠️ ${lo:,.2f}{hi_str}/hr (hourly)"
                 if pd.notna(hi) and hi > lo:
                     return f"${lo:,.0f} – ${hi:,.0f}"
                 return f"${lo:,.0f}"
         except Exception:
             pass
-        return txt if isinstance(txt, str) else ""
+        return ""
 
     f2["Salary"] = f2.apply(fmt_salary, axis=1)
 
