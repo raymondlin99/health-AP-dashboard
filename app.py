@@ -633,7 +633,7 @@ with tab_analytics:
 st.markdown("""
 <div style="margin-top:32px;padding:18px 24px;background:linear-gradient(135deg,#1e3a5f,#1e293b);
      border-radius:14px;color:#94a3b8;font-size:0.75rem;text-align:center;line-height:1.8;">
-  Sources: <b style="color:#cbd5e1">HigherEdJobs RSS</b> · <b style="color:#cbd5e1">Academic Jobs Online RSS</b> ·
+  Sources: <b style="color:#cbd5e1">HigherEdJobs RSS + Keyword Search</b> ·
   <b style="color:#cbd5e1">Carnegie Classification 2021</b> · <b style="color:#cbd5e1">OpenStreetMap Nominatim</b> ·
   <b style="color:#cbd5e1">SimpleMaps US Cities</b><br>
   Salary data is best-effort extracted from posting text. Always verify on the employer's site.
