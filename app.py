@@ -23,10 +23,49 @@ st.set_page_config(
 # ── custom CSS ──────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-  .metric-card {background:#f0f4ff;border-radius:10px;padding:14px 18px;text-align:center;}
-  .metric-num  {font-size:2rem;font-weight:700;color:#1a3c8f;}
-  .metric-lbl  {font-size:.8rem;color:#555;margin-top:2px;}
-  .section-hdr {font-size:1.15rem;font-weight:600;margin-top:1.2rem;margin-bottom:.4rem;color:#1a3c8f;}
+  /* Dark Orange theme for metric cards */
+  .metric-card {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 20px 24px;
+    text-align: center;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.1);
+    transition: all 0.2s ease-in-out;
+  }
+  .metric-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 15px -3px rgba(249, 115, 22, 0.15), 0 4px 6px -2px rgba(249, 115, 22, 0.1);
+    border-color: #f97316;
+  }
+  /* Typography for numbers and labels */
+  .metric-num {
+    font-size: 2.2rem;
+    font-weight: 800;
+    color: #f97316;
+    letter-spacing: -0.025em;
+    line-height: 1.2;
+  }
+  .metric-lbl {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 8px;
+  }
+  /* Dark mode section headers */
+  .section-hdr {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #f8fafc;
+    margin-top: 2rem;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid #334155;
+  }
+  /* Streamlit native overrides for dark look */
+  [data-testid="stDataFrame"] { border-radius: 8px; border: 1px solid #334155; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -53,7 +92,8 @@ def load_data():
     df.loc[~mask, ["lat","lon"]] = np.nan
     # ensure optional columns exist
     for col, default in [("posted_ago", None), ("published_date", None),
-                         ("city_pop", np.nan), ("city_size", "Unknown")]:
+                         ("city_pop", np.nan), ("city_size", "Unknown"),
+                         ("salary_type", None)]:
         if col not in df.columns:
             df[col] = default
     return df
@@ -99,7 +139,7 @@ if city_size_sel:
     f = f[f["city_size"].isin(city_size_sel)]
 
 # ── KPI row ──────────────────────────────────────────────────────────────────
-st.markdown("## 🎓 Assistant Professor Jobs — Health / Public Health / Policy / Medicine (US)")
+st.markdown("## 🎓 Assistant Professor + Postdoc Jobs — Policy / Health Services Research Focus (US)")
 
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
@@ -206,11 +246,24 @@ with tab_jobs:
         lo = row.get("salary_min")
         hi = row.get("salary_max")
         txt = row.get("salary_text")
+        stype = row.get("salary_type")
         try:
             if pd.notna(lo) and lo > 0:
-                if pd.notna(hi) and hi > lo:
-                    return f"${lo:,.0f} – ${hi:,.0f}"
-                return f"${lo:,.0f}"
+                suffix = ""
+                if stype == "hourly":  suffix = "/hr"
+                elif stype == "monthly": suffix = "/mo"
+                elif stype == "weekly":  suffix = "/wk"
+
+                if stype in ("hourly", "monthly", "weekly"):
+                    fmt = f"${lo:,.2f}" if lo < 100 else f"${lo:,.0f}"
+                    if pd.notna(hi) and hi > lo:
+                        fmt_hi = f"${hi:,.2f}" if hi < 100 else f"${hi:,.0f}"
+                        return f"⚠️ {fmt} – {fmt_hi}{suffix}"
+                    return f"⚠️ {fmt}{suffix}"
+                else:
+                    if pd.notna(hi) and hi > lo:
+                        return f"${lo:,.0f} – ${hi:,.0f}"
+                    return f"${lo:,.0f}"
         except Exception:
             pass
         return txt if isinstance(txt, str) else ""
@@ -237,28 +290,58 @@ with tab_jobs:
         "published_date": "Date Posted", "source": "Source",
         "link": "Apply",
     }
-    display_df = f2[show_cols].rename(columns=rename_map)
-    display_df["_sort_date"] = pd.to_datetime(display_df["Date Posted"], errors="coerce")
-    display_df = display_df.sort_values(by=["_sort_date"], ascending=False, na_position="last")
-    display_df = display_df.drop(columns=["_sort_date"])
 
-    st.markdown(f'<div class="section-hdr">Showing {len(display_df)} positions</div>', unsafe_allow_html=True)
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        height=540,
-        column_config={
-            "Apply": st.column_config.LinkColumn("Apply", display_text="🔗 Apply"),
-            "Salary": st.column_config.TextColumn("Salary", width="medium"),
-            "City Population": st.column_config.TextColumn("City Population", width="medium"),
-            "Posted": st.column_config.TextColumn("Posted", width="small"),
-            "R-Tier": st.column_config.TextColumn("R-Tier", width="small"),
-        },
-    )
+    _NON_TENURE_PHRASES = ["non-tenure", "non tenure"]
 
-    csv = display_df.drop(columns=["Apply"], errors="ignore").to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download CSV", csv, "health_jobs.csv", "text/csv")
+    def role_bucket(row) -> str:
+        t = (row.get("title") or "").lower()
+        s = (row.get("summary") or "").lower()
+        combined = t + " " + s
+        if any(p in combined for p in _NON_TENURE_PHRASES):
+            return "Non-Tenure"
+        if "chair" in t:
+            return "Chair / Leadership"
+        if any(k in t for k in ["postdoc", "post doc", "postdoctoral", "post-doctoral"]):
+            return "Postdoc"
+        if "professor" in t:
+            return "Assistant Professor"
+        return "Other"
+
+    f2["role_bucket"] = f2.apply(role_bucket, axis=1)
+
+    def build_display_frame(df_in):
+        out = df_in[show_cols].rename(columns=rename_map).copy()
+        out["_sort_date"] = pd.to_datetime(out["Date Posted"], errors="coerce")
+        out = out.sort_values(by=["_sort_date"], ascending=False, na_position="last")
+        return out.drop(columns=["_sort_date"])
+
+    table_cfg = {
+        "Apply": st.column_config.LinkColumn("Apply", display_text="🔗 Apply"),
+        "Salary": st.column_config.TextColumn("Salary", width="medium"),
+        "City Population": st.column_config.TextColumn("City Population", width="medium"),
+        "Posted": st.column_config.TextColumn("Posted", width="small"),
+        "R-Tier": st.column_config.TextColumn("R-Tier", width="small"),
+    }
+
+    ap_df = build_display_frame(f2[f2["role_bucket"] == "Assistant Professor"])
+    postdoc_df = build_display_frame(f2[f2["role_bucket"] == "Postdoc"])
+    chair_df = build_display_frame(f2[f2["role_bucket"] == "Chair / Leadership"])
+    nontenure_df = build_display_frame(f2[f2["role_bucket"] == "Non-Tenure"])
+
+    st.markdown(f'<div class="section-hdr">🎓 Assistant Professor positions ({len(ap_df)})</div>', unsafe_allow_html=True)
+    st.dataframe(ap_df, use_container_width=True, hide_index=True, height=360, column_config=table_cfg)
+
+    st.markdown(f'<div class="section-hdr">🔬 Postdoc positions ({len(postdoc_df)})</div>', unsafe_allow_html=True)
+    st.dataframe(postdoc_df, use_container_width=True, hide_index=True, height=360, column_config=table_cfg)
+
+    st.markdown(f'<div class="section-hdr">📋 Non-Tenure positions ({len(nontenure_df)})</div>', unsafe_allow_html=True)
+    st.dataframe(nontenure_df, use_container_width=True, hide_index=True, height=360, column_config=table_cfg)
+
+    st.markdown(f'<div class="section-hdr">🪑 Chair / Leadership positions ({len(chair_df)})</div>', unsafe_allow_html=True)
+    st.dataframe(chair_df, use_container_width=True, hide_index=True, height=360, column_config=table_cfg)
+
+    csv = pd.concat([ap_df, postdoc_df, nontenure_df, chair_df], ignore_index=True).drop(columns=["Apply"], errors="ignore").to_csv(index=False).encode("utf-8")
+    st.download_button("⬇️ Download CSV", csv, "health_jobs_all.csv", "text/csv")
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 3 — ANALYTICS
